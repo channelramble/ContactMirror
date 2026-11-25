@@ -315,11 +315,33 @@ public final class AppleCalendarProvider: RecordProvider, @unchecked Sendable {
         var groups: [String: [EKEvent]] = [:]
         var order: [String] = []
         for e in windowEvents(cal) {
-            let id = e.calendarItemIdentifier
-            if groups[id] == nil { order.append(id) }
-            groups[id, default: []].append(e)
+            let key = Self.seriesKey(e)
+            if groups[key] == nil { order.append(key) }
+            groups[key, default: []].append(e)
         }
         return order.map { item(groups[$0]!) }
+    }
+
+    /// Edited ("detached") occurrences get their own calendarItemIdentifier in EventKit, but
+    /// share the iCalendar UID with their series, so group by that.
+    static func seriesKey(_ e: EKEvent) -> String {
+        if let uid = e.calendarItemExternalIdentifier, !uid.isEmpty { return "uid:" + uid }
+        return "id:" + e.calendarItemIdentifier
+    }
+
+    /// The series master (or the plain event) for a group of occurrences.
+    func master(of group: [EKEvent]) -> EKEvent {
+        let plain = group.first { !$0.isDetached } ?? group[0]
+        let recurring = group.contains { $0.hasRecurrenceRules || $0.isDetached }
+        if recurring {
+            if !plain.isDetached, let m = store.calendarItem(withIdentifier: plain.calendarItemIdentifier) as? EKEvent { return m }
+            if let uid = group[0].calendarItemExternalIdentifier,
+               let m = store.calendarItems(withExternalIdentifier: uid).compactMap({ $0 as? EKEvent })
+                .first(where: { !$0.isDetached && $0.calendar?.calendarIdentifier == calendarID }) {
+                return m
+            }
+        }
+        return plain
     }
 
     static func times(_ e: EKEvent, allDay: Bool) -> (String, String) {
@@ -334,11 +356,7 @@ public final class AppleCalendarProvider: RecordProvider, @unchecked Sendable {
     }
 
     func item(_ group: [EKEvent]) -> RemoteItem<EventRecord> {
-        let first = group[0]
-        let recurring = group.contains { $0.hasRecurrenceRules || $0.isDetached }
-        var master = first
-        if recurring, let m = store.calendarItem(withIdentifier: first.calendarItemIdentifier) as? EKEvent { master = m }
-        if master.isDetached, let plain = group.first(where: { !$0.isDetached }) { master = plain }
+        let master = master(of: group)
 
         var r = EventRecord()
         r.title = master.title ?? ""
@@ -417,8 +435,9 @@ public final class AppleCalendarProvider: RecordProvider, @unchecked Sendable {
         let cal = try calendar
         let orig = allDay ? EventTime.localDay(originalStart) : EventTime.date(fromUTC: originalStart)
         guard let orig else { return nil }
+        let key = (store.calendarItem(withIdentifier: id) as? EKEvent).map(Self.seriesKey) ?? "id:" + id
         func matches(_ e: EKEvent) -> Bool {
-            guard e.calendarItemIdentifier == id, let od = e.occurrenceDate else { return false }
+            guard e.calendarItemIdentifier == id || Self.seriesKey(e) == key, let od = e.occurrenceDate else { return false }
             return allDay ? Calendar.current.isDate(od, inSameDayAs: orig) : abs(od.timeIntervalSince(orig)) < 60
         }
         let near = store.events(matching: store.predicateForEvents(withStart: orig.addingTimeInterval(-86400),
@@ -447,7 +466,8 @@ public final class AppleCalendarProvider: RecordProvider, @unchecked Sendable {
 
     func readBack(_ id: String) throws -> RemoteItem<EventRecord> {
         let cal = try calendar
-        let group = windowEvents(cal).filter { $0.calendarItemIdentifier == id }
+        let key = (store.calendarItem(withIdentifier: id) as? EKEvent).map(Self.seriesKey) ?? "id:" + id
+        let group = windowEvents(cal).filter { $0.calendarItemIdentifier == id || Self.seriesKey($0) == key }
         if !group.isEmpty { return item(group) }
         guard let e = store.calendarItem(withIdentifier: id) as? EKEvent else { throw EventKitError.notFound }
         return item([e])

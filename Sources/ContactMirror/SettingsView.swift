@@ -167,7 +167,7 @@ struct AccountsTab: View {
             } header: {
                 Text("Google Contacts")
             } footer: {
-                Text("Google requires every app that edits contacts to have its own OAuth client. The README walks you through creating one in about five minutes; your credentials and tokens stay in this Mac's Keychain.")
+                Text("Google requires every app that edits contacts to have its own OAuth client. The README walks you through creating one in about five minutes; your credentials and tokens stay on this Mac, readable only by your account.")
                     .font(.caption).foregroundStyle(.secondary)
             }
 

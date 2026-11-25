@@ -89,7 +89,7 @@ final class AppModel: ObservableObject {
         autoInstallUpdates = defaults.bool(forKey: "autoInstallUpdates")
         lastSync = defaults.object(forKey: "lastSync") as? Date
         lastSummary = defaults.string(forKey: "lastSummary") ?? ""
-        // Installer hook: an OAuth client secret written to defaults is moved into the Keychain.
+        // Installer hook: an OAuth client secret written to defaults is moved into the credentials file.
         if let secret = defaults.string(forKey: "bootstrapClientSecret"), !secret.isEmpty {
             auth.clientSecret = secret
             defaults.removeObject(forKey: "bootstrapClientSecret")

@@ -153,7 +153,7 @@ scripts/                     build, release and icon scripts
 
 ## Privacy
 
-ContactMirror has no server. Your contacts go directly between your Mac, Google's API and iCloud (through macOS). The Google refresh token and client secret are stored in your login Keychain. The only other network request is the GitHub release check.
+ContactMirror has no server. Your contacts go directly between your Mac, Google's API and iCloud (through macOS). The Google refresh token and client secret are stored in `~/Library/Application Support/ContactMirror/credentials.json`, readable only by your user account. (Not the Keychain: with a self-signed app, macOS would ask for your password after every update.) The only other network request is the GitHub release check.
 
 ## License
 
