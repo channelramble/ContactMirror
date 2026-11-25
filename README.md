@@ -118,7 +118,7 @@ SIGN_IDENTITY="ContactMirror Code Signing" SIGN_KEYCHAIN=/path/to/signing.keycha
 scripts/release.sh 1.1.0 "What changed"
 ```
 
-This bumps `VERSION`, tags `v1.1.0` and pushes. The **Release** workflow tests, builds a universal binary, signs it with the certificate stored in the `SIGNING_P12_BASE64` / `SIGNING_P12_PASSWORD` repository secrets, and publishes the GitHub release. Every installed copy then updates itself.
+This runs the tests, builds a universal binary signed with the release certificate, tags `v1.1.0`, and publishes the GitHub release with `ContactMirror.zip`. Every installed copy then updates itself. The signing certificate stays on the maintainer's Mac (`~/.contactmirror-signing`). It's self-signed, not an Apple Developer ID; its only job is to make sure updates come from the same publisher.
 
 ## Project layout
 
