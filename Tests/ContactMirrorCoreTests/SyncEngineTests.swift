@@ -1,7 +1,8 @@
 import XCTest
 @testable import ContactMirrorCore
 
-final class MockProvider: ContactProvider {
+final class MockProvider: RecordProvider {
+    typealias Record = ContactRecord
     let displayName: String
     var contacts: [String: (ContactRecord, Data?)] = [:]
     var order: [String] = []
@@ -53,7 +54,7 @@ func person(_ given: String, _ family: String, email: String? = nil, phone: Stri
 final class SyncEngineTests: XCTestCase {
     var g: MockProvider!
     var c: MockProvider!
-    var engine: SyncEngine!
+    var engine: SyncEngine<ContactRecord>!
     var stateURL: URL!
 
     override func setUp() {
@@ -140,7 +141,7 @@ final class SyncEngineTests: XCTestCase {
         _ = g.add(person("Mary", "Somerville"))
         try await engine.sync()
         // Simulate the grace period having passed
-        var st = SyncState.load(from: stateURL)
+        var st = SyncState<ContactRecord>.load(from: stateURL)
         for i in st.pairs.indices { st.pairs[i].lastSynced = Date().addingTimeInterval(-3600) }
         try st.save(to: stateURL)
         g.contacts[gid] = nil
@@ -162,14 +163,14 @@ final class SyncEngineTests: XCTestCase {
     func testMassDeletionIsBlocked() async throws {
         for i in 0..<30 { _ = g.add(person("P\(i)", "X", email: "p\(i)@x.com")) }
         try await engine.sync()
-        var st = SyncState.load(from: stateURL)
+        var st = SyncState<ContactRecord>.load(from: stateURL)
         for i in st.pairs.indices { st.pairs[i].lastSynced = Date().addingTimeInterval(-3600) }
         try st.save(to: stateURL)
         g.contacts.removeAll()
         do {
             try await engine.sync()
             XCTFail("expected mass deletion guard")
-        } catch SyncError.massDeletion(let dg, let dc) {
+        } catch SyncError.massDeletion(_, let dg, let dc) {
             XCTAssertEqual(dg, 0)
             XCTAssertEqual(dc, 30)
         }
@@ -183,7 +184,7 @@ final class SyncEngineTests: XCTestCase {
     func testEditAfterDeleteOnOtherSideRecreates() async throws {
         let gid = g.add(person("Rosalind", "Franklin"))
         try await engine.sync()
-        var st = SyncState.load(from: stateURL)
+        var st = SyncState<ContactRecord>.load(from: stateURL)
         for i in st.pairs.indices { st.pairs[i].lastSynced = Date().addingTimeInterval(-3600) }
         try st.save(to: stateURL)
         let cid = c.order.first!
@@ -284,7 +285,8 @@ final class SyncEngineTests: XCTestCase {
     }
 }
 
-final class FailingProvider: ContactProvider {
+final class FailingProvider: RecordProvider {
+    typealias Record = ContactRecord
     let inner: MockProvider
     init(wrapping p: MockProvider) { inner = p }
     var displayName: String { inner.displayName }

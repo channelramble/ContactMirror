@@ -1,6 +1,7 @@
 import AppKit
 import Contacts
 import CryptoKit
+import EventKit
 import ServiceManagement
 import SwiftUI
 import ContactMirrorCore
@@ -29,6 +30,9 @@ final class AppModel: ObservableObject {
     @Published var containerID: String { didSet { defaults.set(containerID, forKey: "icloudContainerID") } }
     @Published var autoCheckUpdates: Bool { didSet { defaults.set(autoCheckUpdates, forKey: "autoCheckUpdates") } }
     @Published var autoInstallUpdates: Bool { didSet { defaults.set(autoInstallUpdates, forKey: "autoInstallUpdates") } }
+    @Published var syncContacts: Bool { didSet { defaults.set(syncContacts, forKey: "syncContacts") } }
+    @Published var syncCalendars: Bool { didSet { defaults.set(syncCalendars, forKey: "syncCalendars"); if syncCalendars { requestEventKit(.event) } } }
+    @Published var syncTasks: Bool { didSet { defaults.set(syncTasks, forKey: "syncTasks"); if syncTasks { requestEventKit(.reminder) } } }
 
     // MARK: Status
 
@@ -37,7 +41,10 @@ final class AppModel: ObservableObject {
     @Published var lastSummary: String { didSet { defaults.set(lastSummary, forKey: "lastSummary") } }
     @Published var lastError: String?
     @Published var counts: (google: Int, icloud: Int)?
-    @Published var pendingDeletion: (google: Int, icloud: Int)?
+    @Published var pausedDeletions: [PausedDeletion] = []
+    var pendingDeletion: [PausedDeletion]? { pausedDeletions.isEmpty ? nil : pausedDeletions }
+    @Published var calendarsAuthorized = EventKitAccess.isAuthorized(.event)
+    @Published var remindersAuthorized = EventKitAccess.isAuthorized(.reminder)
     @Published var logLines: [String] = []
     @Published var contactsAuthorized = AppleContactsProvider.isAuthorized
     @Published var containers: [ContactsContainer] = []
@@ -69,7 +76,11 @@ final class AppModel: ObservableObject {
         defaults.register(defaults: [
             "syncEnabled": true, "syncIntervalMinutes": 30, "conflictPreference": "google",
             "autoCheckUpdates": true, "autoInstallUpdates": true,
+            "syncContacts": true, "syncCalendars": true, "syncTasks": true,
         ])
+        syncContacts = defaults.bool(forKey: "syncContacts")
+        syncCalendars = defaults.bool(forKey: "syncCalendars")
+        syncTasks = defaults.bool(forKey: "syncTasks")
         syncEnabled = defaults.bool(forKey: "syncEnabled")
         syncIntervalMinutes = defaults.integer(forKey: "syncIntervalMinutes")
         preference = ConflictPreference(rawValue: defaults.string(forKey: "conflictPreference") ?? "") ?? .google
@@ -78,6 +89,11 @@ final class AppModel: ObservableObject {
         autoInstallUpdates = defaults.bool(forKey: "autoInstallUpdates")
         lastSync = defaults.object(forKey: "lastSync") as? Date
         lastSummary = defaults.string(forKey: "lastSummary") ?? ""
+        // Installer hook: an OAuth client secret written to defaults is moved into the Keychain.
+        if let secret = defaults.string(forKey: "bootstrapClientSecret"), !secret.isEmpty {
+            auth.clientSecret = secret
+            defaults.removeObject(forKey: "bootstrapClientSecret")
+        }
         refreshAccountState()
     }
 
@@ -115,9 +131,11 @@ final class AppModel: ObservableObject {
         refreshLoginItem()
 
         Task {
-            if CNContactStore.authorizationStatus(for: .contacts) == .notDetermined {
+            if syncContacts, CNContactStore.authorizationStatus(for: .contacts) == .notDetermined {
                 _ = await AppleContactsProvider.requestAccess()
             }
+            if syncCalendars, EventKitAccess.isUndetermined(.event) { _ = await EventKitAccess.request(.event) }
+            if syncTasks, EventKitAccess.isUndetermined(.reminder) { _ = await EventKitAccess.request(.reminder) }
             refreshAccountState()
         }
 
@@ -139,7 +157,7 @@ final class AppModel: ObservableObject {
 
     private func tick() {
         let now = Date()
-        if syncEnabled, isReady, !isSyncing, pendingDeletion == nil {
+        if syncEnabled, isReady, !isSyncing {
             let due = lastAttempt.map { now.timeIntervalSince($0) >= Double(syncIntervalMinutes) * 60 } ?? true
             if due { syncNow() }
         }
@@ -156,7 +174,7 @@ final class AppModel: ObservableObject {
 
     // MARK: Accounts
 
-    var isReady: Bool { googleSignedIn && contactsAuthorized && !effectiveContainerID.isEmpty }
+    var isReady: Bool { setupProblem == nil }
 
     var effectiveContainerID: String {
         if !containerID.isEmpty, containers.contains(where: { $0.id == containerID }) { return containerID }
@@ -166,8 +184,15 @@ final class AppModel: ObservableObject {
     var setupProblem: String? {
         if !auth.isConfigured { return "Add your Google OAuth client in Settings → Accounts." }
         if !googleSignedIn { return "Sign in to Google in Settings → Accounts." }
-        if !contactsAuthorized { return "Allow Contacts access in Settings → Accounts." }
-        if effectiveContainerID.isEmpty { return "Turn on iCloud Contacts on this Mac, then pick it in Settings → Accounts." }
+        if !(syncContacts || syncCalendars || syncTasks) { return "Choose what to sync in Settings → General." }
+        if syncContacts && !contactsAuthorized { return "Allow Contacts access in Settings → Accounts." }
+        if syncContacts && effectiveContainerID.isEmpty { return "Turn on iCloud Contacts on this Mac, then pick it in Settings → Accounts." }
+        if syncCalendars && !calendarsAuthorized { return "Allow full Calendar access in Settings → Accounts." }
+        if syncTasks && !remindersAuthorized { return "Allow full Reminders access in Settings → Accounts." }
+        if (syncCalendars && !auth.hasScope(GoogleAuth.calendarScope)) || (syncTasks && !auth.hasScope(GoogleAuth.tasksScope))
+            || (syncContacts && !auth.hasScope(GoogleAuth.contactsScope)) {
+            return "Sign in to Google again and allow access to Contacts, Calendar and Tasks."
+        }
         return nil
     }
 
@@ -175,6 +200,8 @@ final class AppModel: ObservableObject {
         googleSignedIn = auth.isSignedIn
         googleEmail = auth.email
         contactsAuthorized = AppleContactsProvider.isAuthorized
+        calendarsAuthorized = EventKitAccess.isAuthorized(.event)
+        remindersAuthorized = EventKitAccess.isAuthorized(.reminder)
         containers = AppleContactsProvider.containers()
         if containerID.isEmpty, let id = AppleContactsProvider.defaultICloudContainerID() { containerID = id }
     }
@@ -185,6 +212,18 @@ final class AppModel: ObservableObject {
                 NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Contacts")!)
             } else {
                 _ = await AppleContactsProvider.requestAccess()
+            }
+            refreshAccountState()
+        }
+    }
+
+    func requestEventKit(_ type: EKEntityType) {
+        Task {
+            if EventKitAccess.isDenied(type) {
+                let pane = type == .event ? "Privacy_Calendars" : "Privacy_Reminders"
+                NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?\(pane)")!)
+            } else if !EventKitAccess.isAuthorized(type) {
+                _ = await EventKitAccess.request(type)
             }
             refreshAccountState()
         }
@@ -241,73 +280,134 @@ final class AppModel: ObservableObject {
         }
         isSyncing = true
         lastAttempt = Date()
-        pendingDeletion = nil
+        pausedDeletions = []
         let auth = self.auth
         let containerID = effectiveContainerID
-        let notes = AppleContactsProvider.notesAccessible()
-        let stateURL = self.stateURL(notes: notes)
+        let notes = syncContacts && AppleContactsProvider.notesAccessible()
+        let contactsState = self.stateURL(notes: notes)
+        let supportDir = self.supportDir
         let backupsDir = self.backupsDir
+        let accountKey = googleEmail ?? "google"
+        let (doContacts, doCalendars, doTasks) = (syncContacts, syncCalendars, syncTasks)
         var options = SyncOptions()
         options.preference = preference
         options.allowMassDeletion = allowMassDeletion
         log("Sync started")
 
         Task.detached(priority: .utility) { [weak self] in
-            let google = GoogleContactsProvider(auth: auth, syncNotes: notes)
-            let icloud = AppleContactsProvider(containerID: containerID, syncNotes: notes)
-            let engine = SyncEngine(google: google, icloud: icloud, stateURL: stateURL)
-            engine.log = { line in Task { @MainActor in self?.log(line) } }
-            engine.backup = { g, c in try Backups.write(google: g, icloud: c, to: backupsDir) }
-            if !notes {
-                Task { @MainActor in self?.log("Note: contact notes aren't accessible to apps on this macOS version, so notes are left untouched.") }
+            let logger: (String) -> Void = { line in Task { @MainActor in self?.log(line) } }
+            let backup = BackupWriter(root: backupsDir)
+            var parts: [String] = []
+            var errors = 0
+            var paused: [PausedDeletion] = []
+            var contactCounts: (Int, Int)?
+            var fatal: String?
+
+            if doContacts {
+                let engine = SyncEngine(google: GoogleContactsProvider(auth: auth, syncNotes: notes),
+                                        icloud: AppleContactsProvider(containerID: containerID, syncNotes: notes),
+                                        stateURL: contactsState, what: "contacts")
+                engine.log = logger
+                engine.backup = { g, c in
+                    try backup.writeJSON("contacts", google: g, icloud: c)
+                    try backup.write(AppleContactsProvider.vCards(for: g.map(\.record)), name: "contacts-google.vcf")
+                    try backup.write(AppleContactsProvider.vCards(for: c.map(\.record)), name: "contacts-icloud.vcf")
+                }
+                if !notes { logger("Note: contact notes aren't accessible to apps on this macOS version, so notes are left untouched.") }
+                do {
+                    let r = try await engine.sync(options: options)
+                    parts.append("Contacts: \(r)")
+                    errors += r.errors.count
+                    contactCounts = (r.googleCount, r.icloudCount)
+                } catch let SyncError.massDeletion(what, g, c) {
+                    paused.append(PausedDeletion(what: what, google: g, icloud: c))
+                } catch {
+                    fatal = "Contacts: \(error.localizedDescription)"
+                    logger("Contacts sync failed: \(error.localizedDescription)")
+                }
             }
-            let result: Result<SyncReport, Error>
-            do { result = .success(try await engine.sync(options: options)) } catch { result = .failure(error) }
-            await MainActor.run { self?.finishSync(result) }
+
+            if doCalendars || doTasks {
+                let runner = CollectionSyncRunner(api: GoogleAPIClient(auth: auth), store: EKEventStore(),
+                                                  stateDir: supportDir, accountKey: accountKey)
+                runner.log = logger
+                runner.backup = backup
+                if doCalendars {
+                    do {
+                        let r = try await runner.syncCalendars(options: options)
+                        parts.append("Calendars: \(r)")
+                        errors += r.errors.count
+                    } catch {
+                        fatal = (fatal.map { $0 + "\n" } ?? "") + "Calendars: \(error.localizedDescription)"
+                        logger("Calendar sync failed: \(error.localizedDescription)")
+                    }
+                }
+                if doTasks {
+                    do {
+                        let r = try await runner.syncTasks(options: options)
+                        parts.append("Tasks: \(r)")
+                        errors += r.errors.count
+                    } catch {
+                        fatal = (fatal.map { $0 + "\n" } ?? "") + "Tasks: \(error.localizedDescription)"
+                        logger("Task sync failed: \(error.localizedDescription)")
+                    }
+                }
+                paused += runner.paused
+            }
+            BackupWriter.prune(root: backupsDir)
+
+            let summary = parts.joined(separator: "\n")
+            await MainActor.run {
+                self?.finishSync(summary: summary, errors: errors, paused: paused, counts: contactCounts, fatal: fatal)
+            }
         }
     }
 
-    private func finishSync(_ result: Result<SyncReport, Error>) {
+    private func finishSync(summary: String, errors: Int, paused: [PausedDeletion], counts: (Int, Int)?, fatal: String?) {
         isSyncing = false
-        switch result {
-        case .success(let r):
+        if let counts { self.counts = counts }
+        pausedDeletions = paused
+        if !summary.isEmpty {
             lastSync = Date()
-            lastSummary = r.description
-            counts = (r.googleCount, r.icloudCount)
-            lastError = r.errors.isEmpty ? nil : "\(r.errors.count) contact(s) failed – see Activity."
-            log("Sync finished: \(r.description)")
-        case .failure(let e):
-            if case let SyncError.massDeletion(g, c) = e {
-                pendingDeletion = (g, c)
-            }
-            lastError = e.localizedDescription
-            log("Sync failed: \(e.localizedDescription)")
+            lastSummary = summary
         }
+        if let fatal {
+            lastError = fatal
+        } else if !paused.isEmpty {
+            lastError = "Paused for safety: " + paused.map { "\($0.what) would delete \($0.google) from Google and \($0.icloud) from iCloud" }
+                .joined(separator: "; ") + ". Review in the menu."
+        } else if errors > 0 {
+            lastError = "\(errors) item(s) failed – see Activity."
+        } else {
+            lastError = nil
+        }
+        log("Sync finished" + (summary.isEmpty ? "" : ":\n" + summary))
         if autoInstallUpdates, let u = availableUpdate, !installingUpdate {
             install(u)
         }
     }
 
     func confirmMassDeletion() {
-        guard let p = pendingDeletion else { return }
+        guard !pausedDeletions.isEmpty else { return }
         let alert = NSAlert()
-        alert.messageText = "Allow deleting contacts?"
-        alert.informativeText = "This sync will delete \(p.google) contact(s) from Google and \(p.icloud) from iCloud because they were deleted on the other side. A backup of both address books is saved first (Settings → General → Open Backups)."
+        alert.messageText = "Allow these deletions?"
+        alert.informativeText = pausedDeletions.map { "• \($0.what): \($0.google) from Google, \($0.icloud) from iCloud" }
+            .joined(separator: "\n") + "\n\nThese items were deleted on the other side. A backup is saved first (Settings → General → Open Backups Folder)."
         alert.addButton(withTitle: "Delete and Sync")
         alert.addButton(withTitle: "Cancel")
         alert.alertStyle = .warning
         NSApp.activate(ignoringOtherApps: true)
         if alert.runModal() == .alertFirstButtonReturn {
-            pendingDeletion = nil
+            pausedDeletions = []
             syncNow(allowMassDeletion: true)
         }
     }
 
     func resetSyncLinks() {
-        try? FileManager.default.removeItem(at: stateURL(notes: true))
-        try? FileManager.default.removeItem(at: stateURL(notes: false))
-        pendingDeletion = nil
-        log("Sync links reset – the next sync will re-match contacts without deleting anything.")
+        let files = (try? FileManager.default.contentsOfDirectory(at: supportDir, includingPropertiesForKeys: nil)) ?? []
+        for f in files where f.lastPathComponent.hasPrefix("state-") { try? FileManager.default.removeItem(at: f) }
+        pausedDeletions = []
+        log("Sync links reset – the next sync will re-match items without deleting anything.")
     }
 
     // MARK: Updates
@@ -379,27 +479,5 @@ final class AppModel: ObservableObject {
         } else {
             try? data.write(to: logURL)
         }
-    }
-}
-
-enum Backups {
-    /// Saves both address books (JSON with every synced field + vCards for easy re-import),
-    /// keeping the 15 most recent backups.
-    static func write(google: [RemoteContact], icloud: [RemoteContact], to dir: URL) throws {
-        let f = DateFormatter()
-        f.dateFormat = "yyyy-MM-dd_HH-mm-ss"
-        let folder = dir.appendingPathComponent(f.string(from: Date()), isDirectory: true)
-        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        let enc = JSONEncoder()
-        enc.outputFormatting = [.prettyPrinted, .sortedKeys]
-        struct Entry: Codable { var id: String; var contact: ContactRecord }
-        try enc.encode(google.map { Entry(id: $0.id, contact: $0.record) }).write(to: folder.appendingPathComponent("google.json"))
-        try enc.encode(icloud.map { Entry(id: $0.id, contact: $0.record) }).write(to: folder.appendingPathComponent("icloud.json"))
-        try AppleContactsProvider.vCards(for: google.map(\.record)).write(to: folder.appendingPathComponent("google.vcf"))
-        try AppleContactsProvider.vCards(for: icloud.map(\.record)).write(to: folder.appendingPathComponent("icloud.vcf"))
-
-        let all = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
-        let sorted = all.filter { $0.hasDirectoryPath }.sorted { $0.lastPathComponent > $1.lastPathComponent }
-        for old in sorted.dropFirst(15) { try? FileManager.default.removeItem(at: old) }
     }
 }

@@ -42,7 +42,7 @@ struct GeneralTab: View {
                     Text(model.lastSync.map { $0.formatted(date: .abbreviated, time: .shortened) } ?? "Never")
                 }
                 if !model.lastSummary.isEmpty {
-                    LabeledContent("Result") { Text(model.lastSummary).multilineTextAlignment(.trailing) }
+                    LabeledContent("Result") { Text(model.lastSummary).multilineTextAlignment(.trailing).font(.callout) }
                 }
                 if let next = model.nextSyncDate, !model.isSyncing {
                     LabeledContent("Next sync") { Text(next.formatted(date: .omitted, time: .shortened)) }
@@ -58,6 +58,14 @@ struct GeneralTab: View {
                     }
                     if model.isSyncing { ProgressView().controlSize(.small) }
                 }
+            }
+
+            Section("What to sync") {
+                Toggle("Contacts  (Google Contacts ↔ iCloud Contacts)", isOn: $model.syncContacts)
+                Toggle("Calendars  (Google Calendar ↔ iCloud Calendar)", isOn: $model.syncCalendars)
+                Toggle("Tasks  (Google Tasks ↔ iCloud Reminders)", isOn: $model.syncTasks)
+                Text("Calendars and task lists are paired by name (your main Google calendar and task list pair with the default iCloud ones); any that exist on only one side are created on the other. Events are synced from one year back to two years ahead.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
 
             Section("Schedule") {
@@ -144,6 +152,10 @@ struct AccountsTab: View {
                 }
                 if model.googleSignedIn {
                     LabeledContent("Signed in as") { Text(model.googleEmail ?? "Google account") }
+                    if let p = model.setupProblem, p.contains("Sign in to Google again") {
+                        Text(p).foregroundStyle(.orange)
+                        Button("Sign in Again") { model.signInToGoogle() }
+                    }
                     Button("Sign Out") { model.signOutOfGoogle() }
                 } else {
                     HStack {
@@ -174,10 +186,16 @@ struct AccountsTab: View {
                     LabeledContent("Contacts access") { Text("Not allowed").foregroundStyle(.red) }
                     Button("Allow Access to Contacts") { model.requestContactsAccess() }
                 }
+                permissionRow("Calendar access", granted: model.calendarsAuthorized, enabled: model.syncCalendars) {
+                    model.requestEventKit(.event)
+                }
+                permissionRow("Reminders access", granted: model.remindersAuthorized, enabled: model.syncTasks) {
+                    model.requestEventKit(.reminder)
+                }
             } header: {
-                Text("iCloud Contacts")
+                Text("iCloud")
             } footer: {
-                Text("ContactMirror edits the iCloud account in this Mac's Contacts app, and macOS syncs it to iCloud and your other devices. Pick the account named “iCloud”.")
+                Text("ContactMirror edits the iCloud account in this Mac's Contacts, Calendar and Reminders apps, and macOS syncs it to iCloud and your other devices. For contacts, pick the account named “iCloud”.")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }
@@ -189,6 +207,19 @@ struct AccountsTab: View {
     }
 
     @State private var editingClient = false
+
+    @ViewBuilder
+    func permissionRow(_ title: String, granted: Bool, enabled: Bool, request: @escaping () -> Void) -> some View {
+        if enabled {
+            if granted {
+                LabeledContent(title) { Text("Allowed").foregroundStyle(.green) }
+            } else {
+                LabeledContent(title) {
+                    Button("Allow…", action: request)
+                }
+            }
+        }
+    }
 }
 
 // MARK: - Updates

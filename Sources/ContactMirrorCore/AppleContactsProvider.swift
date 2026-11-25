@@ -23,7 +23,8 @@ public enum AppleContactsError: Error, LocalizedError {
 }
 
 /// iCloud Contacts through the macOS Contacts framework (the Mac's iCloud account syncs it to iCloud).
-public final class AppleContactsProvider: ContactProvider, @unchecked Sendable {
+public final class AppleContactsProvider: RecordProvider, @unchecked Sendable {
+    public typealias Record = ContactRecord
     public let displayName = "iCloud"
     let store: CNContactStore
     public let containerID: String

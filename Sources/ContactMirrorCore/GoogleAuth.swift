@@ -22,7 +22,7 @@ public enum GoogleAuthError: Error, LocalizedError {
 
 /// OAuth 2.0 for installed apps (loopback redirect + PKCE). The refresh token lives in the Keychain.
 public final class GoogleAuth: @unchecked Sendable {
-    public static let scopes = "openid email https://www.googleapis.com/auth/contacts"
+    public static let scopes = "openid email https://www.googleapis.com/auth/contacts https://www.googleapis.com/auth/calendar https://www.googleapis.com/auth/tasks"
     private static let refreshAccount = "google-refresh-token"
     private static let secretAccount = "google-client-secret"
 
@@ -39,6 +39,16 @@ public final class GoogleAuth: @unchecked Sendable {
         set { UserDefaults.standard.set(newValue, forKey: "googleEmail") }
     }
     public var isConfigured: Bool { !clientID.isEmpty && !clientSecret.isEmpty }
+
+    public static let calendarScope = "https://www.googleapis.com/auth/calendar"
+    public static let tasksScope = "https://www.googleapis.com/auth/tasks"
+    public static let contactsScope = "https://www.googleapis.com/auth/contacts"
+
+    /// Scopes the user actually granted (they can untick some on Google's consent screen).
+    public var grantedScopes: Set<String> {
+        Set((UserDefaults.standard.string(forKey: "googleScopes") ?? "").split(separator: " ").map(String.init))
+    }
+    public func hasScope(_ scope: String) -> Bool { grantedScopes.contains(scope) }
     public var isSignedIn: Bool { Keychain.get(Self.refreshAccount) != nil }
 
     private var accessToken: String?
@@ -48,6 +58,12 @@ public final class GoogleAuth: @unchecked Sendable {
     public init() {}
 
     // MARK: Sign in
+
+    /// Lets an installer provide the OAuth client without the settings UI.
+    public func configure(clientID: String, clientSecret: String) {
+        self.clientID = clientID
+        self.clientSecret = clientSecret
+    }
 
     public func signIn(openURL: @escaping (URL) -> Void) async throws {
         guard isConfigured else { throw GoogleAuthError.notConfigured }
@@ -105,6 +121,7 @@ public final class GoogleAuth: @unchecked Sendable {
         Keychain.set(nil, for: Self.refreshAccount)
         lock.withLock { accessToken = nil; accessExpiry = .distantPast }
         email = nil
+        UserDefaults.standard.removeObject(forKey: "googleScopes")
     }
 
     // MARK: Tokens
@@ -133,6 +150,9 @@ public final class GoogleAuth: @unchecked Sendable {
 
     private func store(_ json: [String: Any]) {
         lock.lock(); defer { lock.unlock() }
+        if let scope = json["scope"] as? String, !scope.isEmpty {
+            UserDefaults.standard.set(scope, forKey: "googleScopes")
+        }
         if let t = json["access_token"] as? String {
             accessToken = t
             let ttl = (json["expires_in"] as? Double) ?? Double(json["expires_in"] as? Int ?? 3600)

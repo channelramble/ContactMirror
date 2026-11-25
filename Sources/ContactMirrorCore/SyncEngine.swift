@@ -7,7 +7,7 @@ public enum ConflictPreference: String, Codable, CaseIterable, Sendable {
 public struct SyncOptions: Sendable {
     /// Which side wins when the same field was edited on both sides between two syncs.
     public var preference: ConflictPreference = .google
-    /// Deleting more than max(minimum, fraction * size) contacts from one side pauses the
+    /// Deleting more than max(minimum, fraction * size) items from one side pauses the
     /// sync until the user confirms - protects against an account returning an empty list.
     public var allowMassDeletion = false
     public var massDeletionMinimum = 10
@@ -29,9 +29,22 @@ public struct SyncReport: Sendable, CustomStringConvertible {
     public var matched = 0
     public var errors: [String] = []
 
+    public init() {}
+
     public var changeCount: Int {
         createdInGoogle + createdInICloud + updatedGoogle + updatedICloud +
             deletedFromGoogle + deletedFromICloud + photosCopied
+    }
+
+    public static func + (a: SyncReport, b: SyncReport) -> SyncReport {
+        var r = a
+        r.googleCount += b.googleCount; r.icloudCount += b.icloudCount
+        r.createdInGoogle += b.createdInGoogle; r.createdInICloud += b.createdInICloud
+        r.updatedGoogle += b.updatedGoogle; r.updatedICloud += b.updatedICloud
+        r.deletedFromGoogle += b.deletedFromGoogle; r.deletedFromICloud += b.deletedFromICloud
+        r.photosCopied += b.photosCopied; r.matched += b.matched
+        r.errors += b.errors
+        return r
     }
 
     public var description: String {
@@ -52,39 +65,42 @@ public struct SyncReport: Sendable, CustomStringConvertible {
 }
 
 public enum SyncError: Error, LocalizedError {
-    case massDeletion(google: Int, icloud: Int)
+    case massDeletion(what: String, google: Int, icloud: Int)
 
     public var errorDescription: String? {
         switch self {
-        case let .massDeletion(g, c):
-            return "Paused for safety: this sync would delete \(g) contact(s) from Google and \(c) from iCloud. Review and confirm in the menu."
+        case let .massDeletion(what, g, c):
+            return "Paused for safety: syncing \(what) would delete \(g) item(s) from Google and \(c) from iCloud. Review and confirm in the menu."
         }
     }
 }
 
-/// Two-way, state-based sync between Google and iCloud. After a successful run both
-/// address books contain the same contacts with the same synced fields.
-public final class SyncEngine {
-    public let google: ContactProvider
-    public let icloud: ContactProvider
+/// Two-way, state-based sync of one collection (an address book, a calendar, a task list)
+/// between Google and iCloud. After a successful run both sides hold the same items.
+public final class SyncEngine<R: SyncableRecord> {
+    public let google: any RecordProvider<R>
+    public let icloud: any RecordProvider<R>
     public let stateURL: URL
+    /// Human-readable name of what is being synced, e.g. "contacts" or "calendar “Work”".
+    public var what: String
     public var log: (String) -> Void = { _ in }
     /// Called with the untouched contents of both sides before anything is changed.
-    public var backup: (([RemoteContact], [RemoteContact]) throws -> Void)?
+    public var backup: (([RemoteItem<R>], [RemoteItem<R>]) throws -> Void)?
 
-    public init(google: ContactProvider, icloud: ContactProvider, stateURL: URL) {
+    public init(google: any RecordProvider<R>, icloud: any RecordProvider<R>, stateURL: URL, what: String = "contacts") {
         self.google = google
         self.icloud = icloud
         self.stateURL = stateURL
+        self.what = what
     }
 
     enum PhotoMove { case none, googleToICloud, icloudToGoogle }
 
     struct Item {
-        var pair: PairState?
-        var g: RemoteContact?
-        var c: RemoteContact?
-        var target: ContactRecord?
+        var pair: PairState<R>?
+        var g: RemoteItem<R>?
+        var c: RemoteItem<R>?
+        var target: R?
         var writeG = false
         var writeC = false
         var deleteG = false
@@ -101,19 +117,17 @@ public final class SyncEngine {
     }
 
     public func resetState() throws {
-        try SyncState().save(to: stateURL)
+        try SyncState<R>().save(to: stateURL)
     }
 
     @discardableResult
     public func sync(options: SyncOptions = SyncOptions()) async throws -> SyncReport {
         var report = SyncReport()
-        let state = SyncState.load(from: stateURL)
+        let state = SyncState<R>.load(from: stateURL)
 
-        log("Fetching contacts from Google…")
         let gList = try await google.fetchAll()
-        log("Fetching contacts from iCloud…")
         let cList = try await icloud.fetchAll()
-        log("Google: \(gList.count) contacts, iCloud: \(cList.count) contacts")
+        log("\(what.prefix(1).uppercased() + what.dropFirst()): Google \(gList.count), iCloud \(cList.count)")
 
         let items = plan(state: state, gList: gList, cList: cList, preference: options.preference)
 
@@ -124,7 +138,7 @@ public final class SyncEngine {
             n > max(options.massDeletionMinimum, Int(Double(total) * options.massDeletionFraction))
         }
         if !options.allowMassDeletion && (tooMany(delG, of: gList.count) || tooMany(delC, of: cList.count)) {
-            throw SyncError.massDeletion(google: delG, icloud: delC)
+            throw SyncError.massDeletion(what: what, google: delG, icloud: delC)
         }
 
         let work = items.filter(\.hasWork)
@@ -137,12 +151,12 @@ public final class SyncEngine {
 
         if !work.isEmpty, let backup {
             do { try backup(gList, cList) } catch {
-                log("Backup failed, not syncing: \(error.localizedDescription)")
+                log("Backup failed, not syncing \(what): \(error.localizedDescription)")
                 throw error
             }
         }
 
-        var newPairs: [PairState] = []
+        var newPairs: [PairState<R>] = []
         var consecutiveErrors = 0
         var aborted = false
 
@@ -162,7 +176,7 @@ public final class SyncEngine {
                 }
                 consecutiveErrors = 0
             } catch {
-                let name = (item.target ?? item.g?.record ?? item.c?.record)?.displayName ?? "contact"
+                let name = (item.target ?? item.g?.record ?? item.c?.record)?.displayName ?? "item"
                 let msg = "\(name): \(error.localizedDescription)"
                 log("Error – \(msg)")
                 report.errors.append(msg)
@@ -175,13 +189,13 @@ public final class SyncEngine {
             }
             if index % 25 == 24 {
                 // Checkpoint so a crash mid-way never loses track of what was created.
-                var cp = SyncState()
+                var cp = SyncState<R>()
                 cp.pairs = newPairs + items[(index + 1)...].compactMap(\.pair)
                 try? cp.save(to: stateURL)
             }
         }
 
-        var newState = SyncState()
+        var newState = SyncState<R>()
         newState.pairs = newPairs
         try newState.save(to: stateURL)
 
@@ -190,8 +204,8 @@ public final class SyncEngine {
         return report
     }
 
-    /// An existing pair whose two sides are already identical: just record fresh fingerprints.
-    private func refreshed(_ p: PairState, item: Item) -> PairState {
+    /// An existing pair with nothing to do: just record fresh fingerprints.
+    private func refreshed(_ p: PairState<R>, item: Item) -> PairState<R> {
         guard let g = item.g, let c = item.c else { return p }
         var p = p
         p.googleHash = g.record.fingerprint
@@ -211,7 +225,7 @@ public final class SyncEngine {
         if item.isNewMatch { r.matched += 1 }
     }
 
-    private func execute(_ item: Item, report: inout SyncReport) async throws -> PairState? {
+    private func execute(_ item: Item, report: inout SyncReport) async throws -> PairState<R>? {
         if item.deleteG, let g = item.g {
             log("Deleting \"\(g.record.displayName)\" from Google (deleted in iCloud)")
             try await google.delete(g)
@@ -253,7 +267,7 @@ public final class SyncEngine {
         guard var g, var c else { return item.pair }
         if item.isNewMatch { report.matched += 1 }
 
-        var pair = PairState(
+        var pair = PairState<R>(
             googleID: g.id, icloudID: c.id,
             googleHash: g.record.fingerprint, icloudHash: c.record.fingerprint,
             googlePhotoKey: g.photoKey, icloudPhotoKey: c.photoKey,
@@ -299,17 +313,17 @@ public final class SyncEngine {
 
     // MARK: Planning
 
-    func plan(state: SyncState, gList: [RemoteContact], cList: [RemoteContact], preference: ConflictPreference) -> [Item] {
+    func plan(state: SyncState<R>, gList: [RemoteItem<R>], cList: [RemoteItem<R>], preference: ConflictPreference) -> [Item] {
         let preferG = preference == .google
-        var gByID: [String: RemoteContact] = [:]
+        var gByID: [String: RemoteItem<R>] = [:]
         for g in gList { gByID[g.id] = g }
-        var cByID: [String: RemoteContact] = [:]
+        var cByID: [String: RemoteItem<R>] = [:]
         for c in cList { cByID[c.id] = c }
 
         var usedG = Set<String>(), usedC = Set<String>()
         var items: [Item] = []
-        var unpairedG: [RemoteContact] = []
-        var unpairedC: [RemoteContact] = []
+        var unpairedG: [RemoteItem<R>] = []
+        var unpairedC: [RemoteItem<R>] = []
 
         for pair in state.pairs {
             guard !usedG.contains(pair.googleID), !usedC.contains(pair.icloudID) else { continue }
@@ -328,13 +342,19 @@ public final class SyncEngine {
             case (nil, nil):
                 continue
             case let (g?, nil):
-                if g.record.fingerprint == pair.googleHash && g.photoKey == pair.googlePhotoKey {
+                let unchanged = g.record.fingerprint == pair.googleHash && g.photoKey == pair.googlePhotoKey
+                if !google.isSafeToDelete(g) {
+                    items.append(Item(pair: pair, g: g, hold: true))
+                } else if unchanged && !g.readOnly {
                     items.append(Item(pair: pair, g: g, deleteG: true))
                 } else {
-                    unpairedG.append(g) // edited in Google after being deleted in iCloud: keep it
+                    unpairedG.append(g) // edited after being deleted in iCloud (or can't be deleted): keep it
                 }
             case let (nil, c?):
-                if c.record.fingerprint == pair.icloudHash && c.photoKey == pair.icloudPhotoKey {
+                let unchanged = c.record.fingerprint == pair.icloudHash && c.photoKey == pair.icloudPhotoKey
+                if !icloud.isSafeToDelete(c) {
+                    items.append(Item(pair: pair, c: c, hold: true))
+                } else if unchanged && !c.readOnly {
                     items.append(Item(pair: pair, c: c, deleteC: true))
                 } else {
                     unpairedC.append(c)
@@ -343,19 +363,26 @@ public final class SyncEngine {
                 var item = Item(pair: pair, g: g, c: c)
                 let gChanged = g.record.fingerprint != pair.googleHash
                 let cChanged = c.record.fingerprint != pair.icloudHash
-                switch (gChanged, cChanged) {
-                case (false, false):
-                    // Neither side changed since they were reconciled; any remaining difference is
-                    // just how each provider represents the data, so writing would loop forever.
-                    break
-                case (true, false): item.target = g.record
-                case (false, true): item.target = c.record
-                case (true, true):
-                    item.target = ContactRecord.merge3(base: pair.base, a: g.record, b: c.record, preferA: preferG)
+                if g.readOnly || c.readOnly {
+                    // One side can't be edited: keep the other side equal to it.
+                    if gChanged || cChanged {
+                        item.target = g.readOnly ? g.record : c.record
+                    }
+                } else {
+                    switch (gChanged, cChanged) {
+                    case (false, false):
+                        // Neither side changed since they were reconciled; any remaining difference is
+                        // just how each provider represents the data, so writing would loop forever.
+                        break
+                    case (true, false): item.target = g.record
+                    case (false, true): item.target = c.record
+                    case (true, true):
+                        item.target = R.merge3(base: pair.base, a: g.record, b: c.record, preferA: preferG)
+                    }
                 }
                 if let t = item.target {
-                    item.writeG = t != g.record
-                    item.writeC = t != c.record
+                    item.writeG = !g.readOnly && t != g.record
+                    item.writeC = !c.readOnly && t != c.record
                 }
                 let gp = g.photoKey != pair.googlePhotoKey
                 let cp = c.photoKey != pair.icloudPhotoKey
@@ -365,6 +392,7 @@ public final class SyncEngine {
                 case (true, true): item.photo = preferG ? .googleToICloud : .icloudToGoogle
                 case (false, false): break
                 }
+                if g.readOnly && item.photo == .icloudToGoogle { item.photo = .googleToICloud }
                 items.append(item)
             }
         }
@@ -372,60 +400,42 @@ public final class SyncEngine {
         unpairedG += gList.filter { !usedG.contains($0.id) }
         unpairedC += cList.filter { !usedC.contains($0.id) }
 
-        // Match contacts that exist on both sides but aren't linked yet (first sync, or after reset).
+        // Link items that exist on both sides but aren't linked yet (first sync, or after reset).
+        // A key only links when it identifies exactly one unlinked item on each side.
         var cTaken = Set<Int>()
-        var byEmail: [String: [Int]] = [:], byPhone: [String: [Int]] = [:], byName: [String: [Int]] = [:]
-        for (i, c) in unpairedC.enumerated() {
-            for e in c.record.emails { byEmail[e.value.lowercased(), default: []].append(i) }
-            for p in c.record.phones {
-                let k = Matching.phoneKey(p.value)
-                if k.count >= 6 { byPhone[k, default: []].append(i) }
-            }
-            if let n = Matching.nameKey(c.record) { byName[n, default: []].append(i) }
+        let gKeys = unpairedG.map(\.record.matchKeys)
+        let cKeys = unpairedC.map(\.record.matchKeys)
+        let tiers = max(gKeys.map(\.count).max() ?? 0, cKeys.map(\.count).max() ?? 0)
+        var cIndex: [[String: [Int]]] = Array(repeating: [:], count: tiers)
+        var gCount: [[String: Int]] = Array(repeating: [:], count: tiers)
+        for (i, keys) in cKeys.enumerated() {
+            for (t, tier) in keys.enumerated() { for k in Set(tier) { cIndex[t][k, default: []].append(i) } }
         }
-        var gNameCounts: [String: Int] = [:], gEmailCounts: [String: Int] = [:], gPhoneCounts: [String: Int] = [:]
-        for g in unpairedG {
-            if let n = Matching.nameKey(g.record) { gNameCounts[n, default: 0] += 1 }
-            for e in Set(g.record.emails.map { $0.value.lowercased() }) { gEmailCounts[e, default: 0] += 1 }
-            for k in Set(g.record.phones.map { Matching.phoneKey($0.value) }) { gPhoneCounts[k, default: 0] += 1 }
+        for keys in gKeys {
+            for (t, tier) in keys.enumerated() { for k in Set(tier) { gCount[t][k, default: 0] += 1 } }
         }
-
-        // Only link on keys that identify exactly one contact on each side, so two different
-        // people sharing e.g. an office number are never merged.
-        func unique(_ list: [Int]?) -> Int? {
-            guard let list else { return nil }
-            let distinct = Array(Set(list))
-            return distinct.count == 1 && !cTaken.contains(distinct[0]) ? distinct[0] : nil
-        }
-        func findMatch(_ g: RemoteContact) -> Int? {
-            for e in g.record.emails {
-                let k = e.value.lowercased()
-                if gEmailCounts[k] == 1, let i = unique(byEmail[k]) { return i }
-            }
-            for p in g.record.phones {
-                let k = Matching.phoneKey(p.value)
-                guard k.count >= 6 else { continue }
-                if gPhoneCounts[k] == 1, let i = unique(byPhone[k]) { return i }
-            }
-            if let n = Matching.nameKey(g.record), gNameCounts[n] == 1,
-               let list = byName[n], list.count == 1, !cTaken.contains(list[0]) {
-                return list[0]
+        func findMatch(_ gi: Int) -> Int? {
+            for (t, tier) in gKeys[gi].enumerated() {
+                for k in tier where gCount[t][k] == 1 {
+                    if let list = cIndex[t][k], list.count == 1, !cTaken.contains(list[0]) { return list[0] }
+                }
             }
             return nil
         }
 
-        for g in unpairedG {
-            if let i = findMatch(g) {
+        for (gi, g) in unpairedG.enumerated() {
+            if let i = findMatch(gi) {
                 cTaken.insert(i)
                 let c = unpairedC[i]
-                let target = preferG
-                    ? ContactRecord.union(primary: g.record, secondary: c.record)
-                    : ContactRecord.union(primary: c.record, secondary: g.record)
+                let target: R
+                if g.readOnly { target = g.record }
+                else if preferG { target = R.union(primary: g.record, secondary: c.record) }
+                else { target = R.union(primary: c.record, secondary: g.record) }
                 var item = Item(g: g, c: c, target: target, isNewMatch: true)
-                item.writeG = target != g.record
+                item.writeG = !g.readOnly && target != g.record
                 item.writeC = target != c.record
                 if !g.photoKey.isEmpty && c.photoKey.isEmpty { item.photo = .googleToICloud }
-                if g.photoKey.isEmpty && !c.photoKey.isEmpty { item.photo = .icloudToGoogle }
+                if g.photoKey.isEmpty && !c.photoKey.isEmpty && !g.readOnly { item.photo = .icloudToGoogle }
                 items.append(item)
             } else {
                 items.append(Item(g: g, target: g.record, photo: g.photoKey.isEmpty ? .none : .googleToICloud))

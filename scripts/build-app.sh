@@ -38,6 +38,10 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>LSApplicationCategoryType</key><string>public.app-category.productivity</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSContactsUsageDescription</key><string>ContactMirror keeps your iCloud contacts identical to your Google contacts.</string>
+    <key>NSCalendarsFullAccessUsageDescription</key><string>ContactMirror keeps your iCloud calendars identical to your Google calendars.</string>
+    <key>NSCalendarsUsageDescription</key><string>ContactMirror keeps your iCloud calendars identical to your Google calendars.</string>
+    <key>NSRemindersFullAccessUsageDescription</key><string>ContactMirror keeps your iCloud Reminders identical to your Google Tasks.</string>
+    <key>NSRemindersUsageDescription</key><string>ContactMirror keeps your iCloud Reminders identical to your Google Tasks.</string>
     <key>NSHumanReadableCopyright</key><string>MIT License</string>
 </dict>
 </plist>

@@ -6,6 +6,7 @@ let package = Package(
     platforms: [.macOS(.v13)],
     products: [
         .executable(name: "ContactMirror", targets: ["ContactMirror"]),
+        .library(name: "ContactMirrorCore", targets: ["ContactMirrorCore"]),
     ],
     targets: [
         .target(

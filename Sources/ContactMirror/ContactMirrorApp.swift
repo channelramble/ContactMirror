@@ -89,7 +89,7 @@ struct MenuContent: View {
         Group {
             Text(statusLine)
             if let counts = model.counts {
-                Text("Google \(counts.google) · iCloud \(counts.icloud) contacts")
+                Text("Contacts: Google \(counts.google) · iCloud \(counts.icloud)")
             }
             if let err = model.lastError {
                 Text("⚠︎ " + err).lineLimit(3)

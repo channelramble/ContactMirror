@@ -2,22 +2,17 @@ import Foundation
 import ImageIO
 import UniformTypeIdentifiers
 
-public struct GoogleAPIError: Error, LocalizedError {
-    public var status: Int
-    public var message: String
-    public var errorDescription: String? { "Google API error \(status): \(message)" }
-}
-
 /// Google Contacts via the People API.
-public final class GoogleContactsProvider: ContactProvider, @unchecked Sendable {
+public final class GoogleContactsProvider: RecordProvider, @unchecked Sendable {
+    public typealias Record = ContactRecord
     public let displayName = "Google"
     let auth: GoogleAuth
     /// When false, notes (biographies) are neither read nor written - used when the
     /// Mac side cannot access contact notes, so Google notes are never wiped.
     public var syncNotes: Bool
     private let base = "https://people.googleapis.com/v1/"
-    private var lastMutation = Date.distantPast
     private let session: URLSession
+    private let api: GoogleAPIClient
 
     public init(auth: GoogleAuth, syncNotes: Bool) {
         self.auth = auth
@@ -25,6 +20,7 @@ public final class GoogleContactsProvider: ContactProvider, @unchecked Sendable 
         let cfg = URLSessionConfiguration.ephemeral
         cfg.timeoutIntervalForRequest = 60
         self.session = URLSession(configuration: cfg)
+        self.api = GoogleAPIClient(auth: auth)
     }
 
     var readFields: String {
@@ -130,48 +126,7 @@ public final class GoogleContactsProvider: ContactProvider, @unchecked Sendable 
     func request(_ method: String, _ path: String, query: [String: String] = [:],
                  body: [String: Any]? = nil, mutation: Bool = false,
                  idempotent: Bool = true) async throws -> [String: Any] {
-        var comps = URLComponents(string: base + path)!
-        if !query.isEmpty { comps.queryItems = query.sorted { $0.key < $1.key }.map { URLQueryItem(name: $0.key, value: $0.value) } }
-        var attempt = 0
-        var forcedRefresh = false
-        while true {
-            if mutation {
-                // People API asks for sequential, paced writes per user.
-                let wait = 0.35 - Date().timeIntervalSince(lastMutation)
-                if wait > 0 { try await Task.sleep(nanoseconds: UInt64(wait * 1e9)) }
-                lastMutation = Date()
-            }
-            var req = URLRequest(url: comps.url!)
-            req.httpMethod = method
-            let token = try await auth.validAccessToken(forceRefresh: forcedRefresh)
-            req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-            if let body {
-                req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                req.httpBody = try JSONSerialization.data(withJSONObject: body)
-            }
-            let (data, resp): (Data, URLResponse)
-            do {
-                (data, resp) = try await session.data(for: req)
-            } catch {
-                attempt += 1
-                if attempt > 4 || !idempotent { throw error }
-                try await Task.sleep(nanoseconds: UInt64(pow(2.0, Double(attempt)) * 1e9))
-                continue
-            }
-            let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
-            let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
-            if (200..<300).contains(status) { return json }
-            if status == 401 && !forcedRefresh { forcedRefresh = true; continue }
-            if (status == 429 || (idempotent && [500, 502, 503, 504].contains(status))) && attempt < 6 {
-                attempt += 1
-                var delay = pow(2.0, Double(attempt))
-                if let ra = (resp as? HTTPURLResponse)?.value(forHTTPHeaderField: "Retry-After"), let s = Double(ra) { delay = max(delay, s) }
-                try await Task.sleep(nanoseconds: UInt64(min(delay, 90) * 1e9))
-                continue
-            }
-            let msg = ((json["error"] as? [String: Any])?["message"] as? String) ?? String(data: data, encoding: .utf8) ?? ""
-            throw GoogleAPIError(status: status, message: msg)
-        }
+        try await api.request(method, base + path, query: query, body: body, mutation: mutation, idempotent: idempotent)
     }
 
     // MARK: Mapping

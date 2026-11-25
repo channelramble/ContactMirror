@@ -41,7 +41,7 @@ public struct DateValue: Codable, Hashable, Sendable {
 
 /// The provider-neutral representation of a contact. Everything the app keeps identical
 /// between Google and iCloud lives here; anything else on either side is left untouched.
-public struct ContactRecord: Codable, Hashable, Sendable {
+public struct ContactRecord: SyncableRecord {
     public var namePrefix = ""
     public var givenName = ""
     public var middleName = ""
@@ -110,12 +110,14 @@ public struct ContactRecord: Codable, Hashable, Sendable {
         return r
     }
 
-    /// Stable fingerprint of the normalised record.
-    public var fingerprint: String {
-        let enc = JSONEncoder()
-        enc.outputFormatting = [.sortedKeys]
-        let data = (try? enc.encode(normalized())) ?? Data()
-        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    /// Email first, then phone number, then a name.
+    public var matchKeys: [[String]] {
+        let r = normalized()
+        return [
+            Array(Set(r.emails.map { $0.value.lowercased() })),
+            Array(Set(r.phones.map { Matching.phoneKey($0.value) }.filter { $0.count >= 6 })),
+            Matching.nameKey(r).map { [$0] } ?? [],
+        ]
     }
 
     public var displayName: String {
