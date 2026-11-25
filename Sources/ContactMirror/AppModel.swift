@@ -90,7 +90,18 @@ final class AppModel: ObservableObject {
     func start() {
         guard !started else { return }
         started = true
-        if previewMode { log("Preview mode: syncing disabled"); return }
+        if previewMode {
+            log("Preview mode: syncing disabled")
+            // Maintainer test hook: exercise the full self-update path.
+            if ProcessInfo.processInfo.environment["CONTACTMIRROR_TEST_UPDATE"] == "1" {
+                Task {
+                    await checkForUpdates(userInitiated: true)
+                    print("update check: \(updateStatus)")
+                    if let u = availableUpdate { install(u) } else { NSApp.terminate(nil) }
+                }
+            }
+            return
+        }
         // Keep the app responsive in the background (no App Nap) while still letting the Mac sleep.
         activity = ProcessInfo.processInfo.beginActivity(
             options: [.userInitiatedAllowingIdleSystemSleep],
