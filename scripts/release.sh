@@ -24,7 +24,7 @@ VERSION="$NEW" SIGN_IDENTITY="ContactMirror Code Signing" SIGN_KEYCHAIN="$KC" ./
 
 echo "$NEW" > VERSION
 git add VERSION
-git commit -m "Release $NEW"
+git diff --cached --quiet || git commit -m "Release $NEW"
 git tag -a "v$NEW" -m "$NOTES"
 git push origin HEAD "v$NEW"
 gh release create "v$NEW" dist/ContactMirror.zip --title "ContactMirror $NEW" --notes "$NOTES"
