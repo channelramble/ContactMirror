@@ -50,6 +50,12 @@ public final class GoogleCalendarProvider: RecordProvider, @unchecked Sendable {
         Self.base + "calendars/\(calendarID.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? calendarID)/events"
     }
 
+    /// Google only accepts http(s) links on events (Apple allows e.g. messages:// links).
+    static func googleAcceptsURL(_ s: String) -> Bool {
+        let l = s.lowercased()
+        return l.hasPrefix("http://") || l.hasPrefix("https://")
+    }
+
     public static func calendars(api: GoogleAPIClient) async throws -> [SyncCollection] {
         var out: [SyncCollection] = []
         var token: String?
@@ -207,7 +213,7 @@ public final class GoogleCalendarProvider: RecordProvider, @unchecked Sendable {
             } ?? []
             b["recurrence"] = ["RRULE:" + r.recurrence] + extras
         }
-        if !r.url.isEmpty {
+        if Self.googleAcceptsURL(r.url) {
             b["source"] = ["url": r.url, "title": r.title.isEmpty ? r.url : r.title]
         } else if existing?.meta["hasSource"] == "1" {
             b["source"] = NSNull()

@@ -150,7 +150,14 @@ public final class AppleContactsProvider: RecordProvider, @unchecked Sendable {
         Self.apply(record, to: m, includeNotes: syncNotes)
         let req = CNSaveRequest()
         req.update(m)
-        try execute(req)
+        do {
+            try execute(req)
+        } catch where ContactsAppleScript.isNotesPermissionError(error) {
+            // Contact has a note: let the Contacts app make the edit (see ContactsAppleScript).
+            try ContactsAppleScript.run(ContactsAppleScript.updateScript(id: existing.id, record: record))
+            // Fields AppleScript can't express (IM handles, other dates, year-less birthdays)
+            // are kept as they were; the read-back below records exactly what was stored.
+        }
         return try fetch(existing.id)
     }
 
@@ -160,7 +167,11 @@ public final class AppleContactsProvider: RecordProvider, @unchecked Sendable {
         guard let m = current.mutableCopy() as? CNMutableContact else { return }
         let req = CNSaveRequest()
         req.delete(m)
-        try execute(req)
+        do {
+            try execute(req)
+        } catch where ContactsAppleScript.isNotesPermissionError(error) {
+            try ContactsAppleScript.run(ContactsAppleScript.deleteScript(id: existing.id))
+        }
     }
 
     public func photoData(for contact: RemoteContact) async throws -> Data? {

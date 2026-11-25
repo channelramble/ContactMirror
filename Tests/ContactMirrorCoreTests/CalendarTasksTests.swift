@@ -170,3 +170,29 @@ final class CalendarTasksTests: XCTestCase {
         XCTAssertEqual(createdG, ["Family"])
     }
 }
+
+final class AppleScriptTests: XCTestCase {
+    func testGeneratedScriptCompiles() throws {
+        var r = ContactRecord()
+        r.namePrefix = "Dr"; r.givenName = "Emily \"Em\""; r.familyName = "Harrison"; r.nickname = "Em"
+        r.phoneticGivenName = "Em"; r.phoneticMiddleName = "X"; r.organization = "Clinic"; r.jobTitle = "Dentist"
+        r.emails = [LabeledValue(label: "work", value: "em@example.com")]
+        r.phones = [LabeledValue(label: "iphone", value: "+1 555 0100"), LabeledValue(label: "homefax", value: "1")]
+        r.urls = [LabeledValue(label: "homepage", value: "https://x.example")]
+        r.relations = [LabeledValue(label: "spouse", value: "Sam")]
+        r.addresses = [PostalAddress(label: "home", street: "1 Main\nApt 2", city: "Town", region: "FL", postalCode: "33000", country: "USA", countryCode: "us")]
+        r.birthday = DateValue(year: 1990, month: 2, day: 28)
+        let script = ContactsAppleScript.updateScript(id: "ABC:ABPerson", record: r)
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("cm-\(UUID()).applescript")
+        try script.write(to: url, atomically: true, encoding: .utf8)
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/osacompile")
+        let out = url.deletingPathExtension().appendingPathExtension("scpt")
+        p.arguments = ["-o", out.path, url.path]
+        let err = Pipe(); p.standardError = err
+        try p.run(); p.waitUntilExit()
+        let msg = String(data: err.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        XCTAssertEqual(p.terminationStatus, 0, "osacompile failed: \(msg)\n\(script)")
+        try? FileManager.default.removeItem(at: url); try? FileManager.default.removeItem(at: out)
+    }
+}

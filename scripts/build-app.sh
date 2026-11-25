@@ -42,6 +42,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>NSCalendarsUsageDescription</key><string>ContactMirror keeps your iCloud calendars identical to your Google calendars.</string>
     <key>NSRemindersFullAccessUsageDescription</key><string>ContactMirror keeps your iCloud Reminders identical to your Google Tasks.</string>
     <key>NSRemindersUsageDescription</key><string>ContactMirror keeps your iCloud Reminders identical to your Google Tasks.</string>
+    <key>NSAppleEventsUsageDescription</key><string>ContactMirror asks the Contacts app to update contacts that have notes, which macOS doesn't let other apps edit directly.</string>
     <key>NSHumanReadableCopyright</key><string>MIT License</string>
 </dict>
 </plist>
