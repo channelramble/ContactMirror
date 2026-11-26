@@ -1,4 +1,5 @@
 import Foundation
+import CoreServices
 
 /// Fallback writer that edits contacts through the Contacts app via AppleScript.
 ///
@@ -84,14 +85,67 @@ enum ContactsAppleScript {
     static var blockedUntil = Date.distantPast
     static let blockLock = NSLock()
 
+    static var promptRequested = false
+
+    /// Asks macOS (without waiting on any dialog) whether we may control Contacts.app.
+    static func automationStatus(ask: Bool) -> OSStatus {
+        var addr = AEAddressDesc()
+        let bundleID = "com.apple.AddressBook"
+        let created = bundleID.withCString { ptr in AECreateDesc(typeApplicationBundleID, ptr, strlen(ptr), &addr) }
+        guard created == noErr else { return OSStatus(created) }
+        defer { AEDisposeDesc(&addr) }
+        return AEDeterminePermissionToAutomateTarget(&addr, typeWildCard, typeWildCard, ask)
+    }
+
+    static func ensureAutomationAllowed() throws {
+        var status = automationStatus(ask: false)
+        if status == OSStatus(procNotFound) {
+            // The check needs Contacts.app running; start it hidden in the background.
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+            p.arguments = ["-g", "-j", "-b", "com.apple.AddressBook"]
+            try? p.run(); p.waitUntilExit()
+            for _ in 0..<50 where status == OSStatus(procNotFound) {
+                Thread.sleep(forTimeInterval: 0.1)
+                status = automationStatus(ask: false)
+            }
+        }
+        switch status {
+        case noErr:
+            return
+        case OSStatus(errAEEventWouldRequireUserConsent):
+            // Show macOS's permission prompt once, in the background, and carry on syncing
+            // everything else instead of waiting for someone to answer it.
+            let shouldAsk = blockLock.withLock { () -> Bool in
+                if promptRequested { return false }
+                promptRequested = true
+                return true
+            }
+            if shouldAsk {
+                Thread.detachNewThread {
+                    _ = automationStatus(ask: true)
+                    blockLock.withLock { promptRequested = false; blockedUntil = .distantPast }
+                }
+            }
+            throw NSError(domain: "ContactMirror", code: -1744, userInfo: [NSLocalizedDescriptionKey:
+                "Waiting for permission to control the Contacts app (needed for contacts that have notes). Click OK on the macOS prompt, or allow it in System Settings → Privacy & Security → Automation."])
+        case OSStatus(errAEEventNotPermitted):
+            throw NSError(domain: "ContactMirror", code: -1743, userInfo: [NSLocalizedDescriptionKey:
+                "ContactMirror isn't allowed to control the Contacts app, so contacts that have notes can't be updated. Allow it in System Settings → Privacy & Security → Automation → ContactMirror → Contacts."])
+        default:
+            return // unknown: just try, the script reports real errors
+        }
+    }
+
     static func run(_ script: String) throws {
+        try ensureAutomationAllowed()
         if blockLock.withLock({ Date() < blockedUntil }) {
             throw NSError(domain: "ContactMirror", code: -1743, userInfo: [NSLocalizedDescriptionKey:
                 "Waiting for permission to control the Contacts app (needed for contacts that have notes). Allow it in System Settings → Privacy & Security → Automation."])
         }
         do { try runUnchecked(script) } catch {
             let code = (error as NSError).code
-            if code == -1743 || code == -1712 { blockLock.withLock { blockedUntil = Date().addingTimeInterval(20 * 60) } }
+            if code == -1743 || code == -1712 || code == -1744 { blockLock.withLock { blockedUntil = Date().addingTimeInterval(20 * 60) } }
             throw error
         }
     }
@@ -117,6 +171,10 @@ enum ContactsAppleScript {
         }
         if p.terminationStatus != 0 {
             let msg = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            if msg.contains("-1712") {
+                throw NSError(domain: "ContactMirror", code: -1712, userInfo: [NSLocalizedDescriptionKey:
+                    "The Contacts app didn't respond (it may be waiting on a permission prompt)."])
+            }
             if msg.contains("-1743") || msg.lowercased().contains("not authorized") {
                 throw NSError(domain: "ContactMirror", code: -1743, userInfo: [NSLocalizedDescriptionKey:
                     "This contact has a note, so macOS only lets the Contacts app edit it. Allow ContactMirror to control Contacts in System Settings → Privacy & Security → Automation."])
