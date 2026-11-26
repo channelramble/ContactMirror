@@ -97,8 +97,23 @@ enum ContactsAppleScript {
         return AEDeterminePermissionToAutomateTarget(&addr, typeWildCard, typeWildCard, ask)
     }
 
+    /// The status query itself can block while a consent prompt is already on screen, so run
+    /// it on its own thread and treat "no answer within 3 s" as "waiting for the user".
+    static func automationStatusQuick() -> OSStatus {
+        let sem = DispatchSemaphore(value: 0)
+        let box = StatusBox()
+        Thread.detachNewThread {
+            box.value = automationStatus(ask: false)
+            sem.signal()
+        }
+        if sem.wait(timeout: .now() + 3) == .timedOut { return OSStatus(errAEEventWouldRequireUserConsent) }
+        return box.value
+    }
+
+    final class StatusBox: @unchecked Sendable { var value: OSStatus = noErr }
+
     static func ensureAutomationAllowed() throws {
-        var status = automationStatus(ask: false)
+        var status = automationStatusQuick()
         if status == OSStatus(procNotFound) {
             // The check needs Contacts.app running; start it hidden in the background.
             let p = Process()
@@ -107,7 +122,7 @@ enum ContactsAppleScript {
             try? p.run(); p.waitUntilExit()
             for _ in 0..<50 where status == OSStatus(procNotFound) {
                 Thread.sleep(forTimeInterval: 0.1)
-                status = automationStatus(ask: false)
+                status = automationStatusQuick()
             }
         }
         switch status {
