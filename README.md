@@ -33,7 +33,7 @@ ContactMirror runs quietly in the menu bar, starts at login, and every 30 minute
 - **Range:** events from 1 year ago to 2 years ahead.
 - **Invitations:** events you were invited to but don't organise are copied as-is and kept matching the original, but ContactMirror never edits or deletes the original invitation.
 - **Not synced:** alerts (each side keeps its own), attendees, attachments, video-call links, and colours. Google birthday and working-location entries are skipped.
-- **Recurring events:** deleting a single occurrence in Google is mirrored to iCloud. Apple doesn't let apps see single deleted occurrences, so deleting one occurrence on the iPhone/Mac isn't copied to Google. Deleting or editing the whole series works both ways.
+- **Recurring events:** editing or deleting the whole series, or a single occurrence, works both ways. Apple doesn't expose deleted occurrences directly, so ContactMirror works out which occurrences of the repeat rule are missing.
 
 ### Tasks (Google Tasks ↔ iCloud Reminders)
 
@@ -58,7 +58,7 @@ Anything ContactMirror doesn't sync stays exactly as it was on both sides.
    - Run `xattr -dr com.apple.quarantine /Applications/ContactMirror.app` in Terminal.
 
    You only do this once. Later updates are installed by the app itself.
-3. ContactMirror adds a 👥 icon to the menu bar and opens its Settings window. When asked, allow access to Contacts, Calendars and Reminders (choose "Allow Full Access").
+3. ContactMirror adds a 👥 icon to the menu bar and opens its Settings window. When asked, allow access to Contacts, Calendars and Reminders (choose "Allow Full Access"). Later macOS may also ask whether ContactMirror may **control Contacts**: click **OK**. macOS doesn't let other apps edit contacts that have notes, so ContactMirror asks the Contacts app to save those changes.
 
 ## Setup
 

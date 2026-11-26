@@ -25,6 +25,11 @@ struct CollectionLinks: Codable {
 }
 
 public enum CollectionMapper {
+    /// "College " and "college" are the same calendar.
+    static func titleKey(_ s: String) -> String {
+        s.trimmingCharacters(in: .whitespacesAndNewlines).folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil)
+    }
+
     /// Pairs every Google collection with an iCloud one: existing links first, then the two
     /// default collections, then equal names; anything left is created on the other side.
     public static func map(google: [SyncCollection], icloud: [SyncCollection], saved: [CollectionLink],
@@ -35,9 +40,16 @@ public enum CollectionMapper {
         let cByID = Dictionary(icloud.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         var links: [CollectionLink] = []
         var usedG = Set<String>(), usedC = Set<String>()
-        for l in saved where gByID[l.googleID] != nil && cByID[l.icloudID] != nil
-            && !usedG.contains(l.googleID) && !usedC.contains(l.icloudID) {
-            links.append(CollectionLink(googleID: l.googleID, icloudID: l.icloudID, title: gByID[l.googleID]!.title))
+        for l in saved where !usedG.contains(l.googleID) && !usedC.contains(l.icloudID) {
+            let g = gByID[l.googleID], c = cByID[l.icloudID]
+            if g == nil && c == nil { continue } // gone on both sides: forget it
+            if g == nil || c == nil {
+                // Deleted (or temporarily hidden) on one side. Keep the link and don't recreate
+                // anything: recreating would undo the user's deletion or duplicate a calendar
+                // that's just not visible right now. The runner skips it.
+                log("“\(l.title)” no longer exists in \(g == nil ? "Google" : "iCloud"); not syncing it. Delete it on the other side too to remove it everywhere.")
+            }
+            links.append(CollectionLink(googleID: l.googleID, icloudID: l.icloudID, title: g?.title ?? c?.title ?? l.title))
             usedG.insert(l.googleID); usedC.insert(l.icloudID)
         }
         var freeG = google.filter { !usedG.contains($0.id) }
@@ -48,7 +60,7 @@ public enum CollectionMapper {
             freeG.remove(at: gd); freeC.remove(at: cd)
         }
         for g in freeG {
-            if let i = freeC.firstIndex(where: { $0.title.lowercased() == g.title.lowercased() }) {
+            if let i = freeC.firstIndex(where: { titleKey($0.title) == titleKey(g.title) }) {
                 links.append(CollectionLink(googleID: g.id, icloudID: freeC[i].id, title: g.title))
                 freeC.remove(at: i)
             } else {
@@ -143,14 +155,21 @@ public final class CollectionSyncRunner: @unchecked Sendable {
     }
 
     func links(kind: String, google: [SyncCollection], icloud: [SyncCollection],
-               createG: (String) async throws -> String, createC: (String) throws -> String) async throws -> [CollectionLink] {
+               createG: @escaping (String) async throws -> String, createC: @escaping (String) throws -> String) async throws -> [CollectionLink] {
+        var createdIDs = Set<String>()
+        let makeG: (String) async throws -> String = { let id = try await createG($0); createdIDs.insert(id); return id }
+        let makeC: (String) throws -> String = { let id = try createC($0); createdIDs.insert(id); return id }
         let url = stateDir.appendingPathComponent("links-\(kind)-\(accountKey.hashValueHex).json")
         var saved = CollectionLinks.load(url)
         saved.links = try await CollectionMapper.map(google: google, icloud: icloud, saved: saved.links,
-                                                     createInGoogle: createG, createInICloud: { try createC($0) },
+                                                     createInGoogle: makeG, createInICloud: { try makeC($0) },
                                                      log: log)
         try saved.save(url)
-        return saved.links
+        // Only sync pairs that exist on both sides right now.
+        let gIDs = Set(google.map(\.id)), cIDs = Set(icloud.map(\.id))
+        return saved.links.filter { l in
+            (gIDs.contains(l.googleID) || createdIDs.contains(l.googleID)) && (cIDs.contains(l.icloudID) || createdIDs.contains(l.icloudID))
+        }
     }
 
     public func syncCalendars(options: SyncOptions) async throws -> SyncReport {

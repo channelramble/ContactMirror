@@ -169,25 +169,11 @@ extension ContactRecord {
         return r
     }
 
-    /// Three-way merge used when both sides changed since the last sync: every field
-    /// takes whichever side changed it; if both changed the same field, `preferA` decides.
-    public static func merge3(base: ContactRecord, a: ContactRecord, b: ContactRecord, preferA: Bool) -> ContactRecord {
-        let base = base.normalized(), a = a.normalized(), b = b.normalized()
-        var r = base
-        func m<T: Equatable>(_ kp: WritableKeyPath<ContactRecord, T>) {
-            let aChanged = a[keyPath: kp] != base[keyPath: kp]
-            let bChanged = b[keyPath: kp] != base[keyPath: kp]
-            switch (aChanged, bChanged) {
-            case (true, true): r[keyPath: kp] = preferA ? a[keyPath: kp] : b[keyPath: kp]
-            case (true, false): r[keyPath: kp] = a[keyPath: kp]
-            case (false, true): r[keyPath: kp] = b[keyPath: kp]
-            case (false, false): break
-            }
-        }
-        for kp in stringFields { m(kp) }
-        m(\.emails); m(\.phones); m(\.urls); m(\.relations); m(\.instantMessages)
-        m(\.addresses); m(\.birthday); m(\.dates)
-        return r
+    public static var mergeFields: [MergeField<ContactRecord>] {
+        stringFields.map { .field($0) } + [
+            .field(\.emails), .field(\.phones), .field(\.urls), .field(\.relations), .field(\.instantMessages),
+            .field(\.addresses), .field(\.birthday), .field(\.dates),
+        ]
     }
 
     static let stringFields: [WritableKeyPath<ContactRecord, String>] = [

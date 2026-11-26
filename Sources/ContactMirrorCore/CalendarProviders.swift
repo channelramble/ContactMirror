@@ -19,7 +19,12 @@ public struct CalendarWindow: Sendable {
         guard let s else { return false }
         if r.recurrence.isEmpty { return s > lo && s < hi }
         if let until = RRule.untilDate(r.recurrence) { return until > lo && s < hi }
-        if RRule.hasCount(r.recurrence) { return s > lo && s < hi }
+        if RRule.hasCount(r.recurrence) {
+            let tz = TimeZone(identifier: r.timeZone) ?? .current
+            guard let all = RecurrenceExpander.expand(r.recurrence, start: s, timeZone: tz, allDay: r.allDay, until: end),
+                  let last = all.last else { return s > lo && s < hi }
+            return last > lo && s < hi
+        }
         return s < hi
     }
 
@@ -322,11 +327,31 @@ public final class AppleCalendarProvider: RecordProvider, @unchecked Sendable {
         return order.map { item(groups[$0]!) }
     }
 
-    /// Edited ("detached") occurrences get their own calendarItemIdentifier in EventKit, but
-    /// share the iCalendar UID with their series, so group by that.
-    static func seriesKey(_ e: EKEvent) -> String {
-        if let uid = e.calendarItemExternalIdentifier, !uid.isEmpty { return "uid:" + uid }
+    /// Edited ("detached") occurrences get their own calendarItemIdentifier in EventKit and an
+    /// external identifier of the form "<series UID>/RID=<original start>", so group by the UID.
+    public static func seriesKey(_ e: EKEvent) -> String {
+        if let ext = e.calendarItemExternalIdentifier, !ext.isEmpty {
+            return "uid:" + (ext.components(separatedBy: "/RID=").first ?? ext)
+        }
         return "id:" + e.calendarItemIdentifier
+    }
+
+    /// When an occurrence would have started. For a detached occurrence EventKit's
+    /// occurrenceDate is its *new* start; the original is only in the "/RID=" suffix
+    /// (seconds since 2001-01-01).
+    static func originalDate(_ e: EKEvent) -> Date? {
+        if e.isDetached, let ext = e.calendarItemExternalIdentifier,
+           let r = ext.components(separatedBy: "/RID=").dropFirst().first, let secs = Double(r) {
+            return Date(timeIntervalSinceReferenceDate: secs)
+        }
+        return e.occurrenceDate ?? e.startDate
+    }
+
+    static func originalString(_ d: Date, allDay: Bool) -> String {
+        guard allDay else { return EventTime.utcString(d) }
+        // All-day recurrence IDs may be stored as UTC midnight (floating) or local midnight.
+        if Int(d.timeIntervalSince1970) % 86400 == 0 { return EventTime.dayFormatter(EventTime.utc).string(from: d) }
+        return EventTime.dayString(d)
     }
 
     /// The series master (or the plain event) for a group of occurrences.
@@ -335,7 +360,8 @@ public final class AppleCalendarProvider: RecordProvider, @unchecked Sendable {
         let recurring = group.contains { $0.hasRecurrenceRules || $0.isDetached }
         if recurring {
             if !plain.isDetached, let m = store.calendarItem(withIdentifier: plain.calendarItemIdentifier) as? EKEvent { return m }
-            if let uid = group[0].calendarItemExternalIdentifier,
+            if let ext = group[0].calendarItemExternalIdentifier,
+               let uid = ext.components(separatedBy: "/RID=").first,
                let m = store.calendarItems(withExternalIdentifier: uid).compactMap({ $0 as? EKEvent })
                 .first(where: { !$0.isDetached && $0.calendar?.calendarIdentifier == calendarID }) {
                 return m
@@ -370,15 +396,34 @@ public final class AppleCalendarProvider: RecordProvider, @unchecked Sendable {
         if let rule = master.recurrenceRules?.first { r.recurrence = RRule.fromEventKit(rule, allDay: master.isAllDay) }
         if !r.recurrence.isEmpty {
             r.overrides = group.filter(\.isDetached).compactMap { occ in
-                guard let od = occ.occurrenceDate else { return nil }
-                let orig = master.isAllDay ? EventTime.dayString(od) : EventTime.utcString(od)
+                guard let od = Self.originalDate(occ) else { return nil }
+                let orig = Self.originalString(od, allDay: master.isAllDay)
                 let (s, e) = Self.times(occ, allDay: occ.isAllDay)
                 return EventOverride(originalStart: orig, title: occ.title ?? "", location: occ.location ?? "",
                                      notes: occ.notes ?? "", allDay: occ.isAllDay, start: s, end: e)
             }
+            r.overrides += cancelledOccurrences(master: master, group: group, rrule: r.recurrence)
         }
         let readOnly = master.organizer.map { !$0.isCurrentUser } ?? false
         return RemoteItem(id: master.calendarItemIdentifier, record: r, readOnly: readOnly)
+    }
+
+    /// Occurrences the rule produces inside the window that EventKit no longer returns were
+    /// deleted on the Apple side ("delete this event only").
+    func cancelledOccurrences(master: EKEvent, group: [EKEvent], rrule: String) -> [EventOverride] {
+        let tz = master.timeZone ?? .current
+        guard let expected = RecurrenceExpander.expand(rrule, start: master.startDate, timeZone: tz,
+                                                        allDay: master.isAllDay, until: window.end) else { return [] }
+        let inWindow = expected.filter { $0 >= window.start && $0 <= window.end }
+        // Only judge occurrences that lie entirely inside the window the occurrences were fetched for.
+        let present = group.compactMap(Self.originalDate)
+        let missing = inWindow.filter { d in
+            !present.contains { master.isAllDay ? Calendar.current.isDate($0, inSameDayAs: d) : abs($0.timeIntervalSince(d)) < 60 }
+        }
+        // Sanity check: if most occurrences look "missing", our expansion disagrees with Apple's
+        // and we'd rather report nothing than delete the wrong instances.
+        if missing.count > 2 && missing.count * 2 > inWindow.count { return [] }
+        return missing.map { EventOverride(originalStart: master.isAllDay ? EventTime.dayString($0) : EventTime.utcString($0), cancelled: true) }
     }
 
     static func setTimes(_ e: EKEvent, allDay: Bool, start: String, end: String, tz: String) {
@@ -437,7 +482,7 @@ public final class AppleCalendarProvider: RecordProvider, @unchecked Sendable {
         guard let orig else { return nil }
         let key = (store.calendarItem(withIdentifier: id) as? EKEvent).map(Self.seriesKey) ?? "id:" + id
         func matches(_ e: EKEvent) -> Bool {
-            guard e.calendarItemIdentifier == id || Self.seriesKey(e) == key, let od = e.occurrenceDate else { return false }
+            guard e.calendarItemIdentifier == id || Self.seriesKey(e) == key, let od = Self.originalDate(e) else { return false }
             return allDay ? Calendar.current.isDate(od, inSameDayAs: orig) : abs(od.timeIntervalSince(orig)) < 60
         }
         let near = store.events(matching: store.predicateForEvents(withStart: orig.addingTimeInterval(-86400),

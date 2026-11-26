@@ -26,6 +26,20 @@ struct ContactMirrorApp: App {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
+        let args = CommandLine.arguments
+        if let i = args.firstIndex(of: "--diag-eventkit") {
+            let out = URL(fileURLWithPath: i + 1 < args.count ? args[i + 1] : NSTemporaryDirectory() + "contactmirror-diag.txt")
+            Task { @MainActor in exit(await SelfTest.diagnoseEventKit(output: out)) }
+            return
+        }
+        if let i = args.firstIndex(of: "--selftest") {
+            let out = URL(fileURLWithPath: i + 1 < args.count ? args[i + 1] : NSTemporaryDirectory() + "contactmirror-selftest.txt")
+            Task { @MainActor in
+                let code = await SelfTest.run(output: out)
+                exit(code)
+            }
+            return
+        }
         Task { @MainActor in
             AppModel.shared.start()
             // First launch, or nothing configured yet: show settings so the user can set it up.

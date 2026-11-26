@@ -28,7 +28,8 @@ public struct TaskRecord: SyncableRecord {
     public var matchKeys: [[String]] {
         let r = normalized()
         guard !r.title.isEmpty else { return [] }
-        return [["\(r.title.lowercased())|\(r.due)"], [r.title.lowercased()]]
+        // Completion state is part of the key so an old finished task never "completes" a new open one.
+        return [["\(r.title.lowercased())|\(r.due)|\(r.completed)"], ["\(r.title.lowercased())|\(r.completed)"]]
     }
 
     public static func union(primary p: TaskRecord, secondary s: TaskRecord) -> TaskRecord {
@@ -42,18 +43,7 @@ public struct TaskRecord: SyncableRecord {
         return r
     }
 
-    public static func merge3(base: TaskRecord, a: TaskRecord, b: TaskRecord, preferA: Bool) -> TaskRecord {
-        let base = base.normalized(), a = a.normalized(), b = b.normalized()
-        var r = base
-        func m<T: Equatable>(_ kp: WritableKeyPath<TaskRecord, T>) {
-            let ac = a[keyPath: kp] != base[keyPath: kp], bc = b[keyPath: kp] != base[keyPath: kp]
-            if ac && bc { r[keyPath: kp] = preferA ? a[keyPath: kp] : b[keyPath: kp] }
-            else if ac { r[keyPath: kp] = a[keyPath: kp] }
-            else if bc { r[keyPath: kp] = b[keyPath: kp] }
-        }
-        m(\.title); m(\.notes); m(\.due); m(\.completed)
-        return r
-    }
+    public static var mergeFields: [MergeField<TaskRecord>] { [.field(\.title), .field(\.notes), .field(\.due), .field(\.completed)] }
 }
 
 // MARK: - Google Tasks
@@ -161,12 +151,14 @@ public enum EventKitError: Error, LocalizedError {
     case notAuthorized(String)
     case collectionMissing(String)
     case notFound
+    case fetchFailed(String)
 
     public var errorDescription: String? {
         switch self {
         case .notAuthorized(let what): return "ContactMirror doesn't have full access to \(what). Allow it in System Settings → Privacy & Security → \(what)."
         case .collectionMissing(let name): return "The iCloud list or calendar “\(name)” no longer exists."
         case .notFound: return "Item no longer exists."
+        case .fetchFailed(let what): return "Couldn't read \(what) from this Mac. Not syncing it this time."
         }
     }
 }
@@ -275,9 +267,11 @@ public final class RemindersProvider: RecordProvider, @unchecked Sendable {
     public func fetchAll() async throws -> [RemoteItem<TaskRecord>] {
         let cal = try calendar
         let predicate = store.predicateForReminders(in: [cal])
-        let reminders: [EKReminder] = await withCheckedContinuation { cont in
-            store.fetchReminders(matching: predicate) { cont.resume(returning: $0 ?? []) }
+        // nil means the fetch failed, which must never look like "the list is empty".
+        let fetched: [EKReminder]? = await withCheckedContinuation { cont in
+            store.fetchReminders(matching: predicate) { cont.resume(returning: $0) }
         }
+        guard let reminders = fetched else { throw EventKitError.fetchFailed("Reminders") }
         return reminders.map(Self.item)
     }
 

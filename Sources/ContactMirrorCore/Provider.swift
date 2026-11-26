@@ -8,14 +8,44 @@ public protocol SyncableRecord: Codable, Hashable, Sendable {
     var displayName: String { get }
     /// Merge used the first time two items are linked: nothing should be lost.
     static func union(primary: Self, secondary: Self) -> Self
-    /// Field-level three-way merge for items edited on both sides since the last sync.
-    static func merge3(base: Self, a: Self, b: Self, preferA: Bool) -> Self
+    /// The fields that are merged independently when both sides changed.
+    static var mergeFields: [MergeField<Self>] { get }
     /// Keys used to link items that aren't linked yet, strongest tier first. A key only
     /// links two items if it identifies exactly one unlinked item on each side.
     var matchKeys: [[String]] { get }
 }
 
+/// One independently mergeable field (or group of fields that must move together).
+public struct MergeField<R> {
+    let apply: (_ r: inout R, _ a: R, _ baseA: R, _ b: R, _ baseB: R, _ preferA: Bool, _ keepA: Bool) -> Void
+
+    public static func field<T: Equatable>(_ kp: WritableKeyPath<R, T>) -> MergeField<R> {
+        MergeField { r, a, baseA, b, baseB, preferA, keepA in
+            let ac = a[keyPath: kp] != baseA[keyPath: kp], bc = b[keyPath: kp] != baseB[keyPath: kp]
+            if ac && bc { r[keyPath: kp] = preferA ? a[keyPath: kp] : b[keyPath: kp] }
+            else if ac { r[keyPath: kp] = a[keyPath: kp] }
+            else if bc { r[keyPath: kp] = b[keyPath: kp] }
+            else { r[keyPath: kp] = keepA ? a[keyPath: kp] : b[keyPath: kp] }
+        }
+    }
+}
+
 extension SyncableRecord {
+    /// Field-by-field merge. Each side is compared with *its own* state after the last sync, so a
+    /// field one side simply can't store is never mistaken for a deletion. Fields neither side
+    /// changed keep the value of the side being written (`keepA`).
+    public static func merge(_ a: Self, baseA: Self, _ b: Self, baseB: Self, preferA: Bool, keepA: Bool) -> Self {
+        let a = a.normalized(), b = b.normalized(), baseA = baseA.normalized(), baseB = baseB.normalized()
+        var r = keepA ? a : b
+        for f in mergeFields { f.apply(&r, a, baseA, b, baseB, preferA, keepA) }
+        return r.normalized()
+    }
+
+    /// Classic three-way merge with one shared base (used in tests).
+    public static func merge3(base: Self, a: Self, b: Self, preferA: Bool) -> Self {
+        merge(a, baseA: base, b, baseB: base, preferA: preferA, keepA: preferA)
+    }
+
     /// Stable fingerprint of the normalised record.
     public var fingerprint: String {
         let enc = JSONEncoder()

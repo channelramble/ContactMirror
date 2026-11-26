@@ -79,7 +79,24 @@ enum ContactsAppleScript {
         """
     }
 
+    /// Once the Contacts app couldn't be reached (permission prompt unanswered or denied), skip
+    /// further attempts for a while instead of waiting two minutes per contact.
+    static var blockedUntil = Date.distantPast
+    static let blockLock = NSLock()
+
     static func run(_ script: String) throws {
+        if blockLock.withLock({ Date() < blockedUntil }) {
+            throw NSError(domain: "ContactMirror", code: -1743, userInfo: [NSLocalizedDescriptionKey:
+                "Waiting for permission to control the Contacts app (needed for contacts that have notes). Allow it in System Settings → Privacy & Security → Automation."])
+        }
+        do { try runUnchecked(script) } catch {
+            let code = (error as NSError).code
+            if code == -1743 || code == -1712 { blockLock.withLock { blockedUntil = Date().addingTimeInterval(20 * 60) } }
+            throw error
+        }
+    }
+
+    static func runUnchecked(_ script: String) throws {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
         p.arguments = ["-"]
@@ -90,7 +107,14 @@ enum ContactsAppleScript {
         try p.run()
         input.fileHandleForWriting.write(Data(script.utf8))
         try input.fileHandleForWriting.close()
-        p.waitUntilExit()
+        // If macOS is waiting for the user to allow automation, don't block the sync forever.
+        let deadline = Date().addingTimeInterval(120)
+        while p.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.1) }
+        if p.isRunning {
+            p.terminate()
+            throw NSError(domain: "ContactMirror", code: -1712, userInfo: [NSLocalizedDescriptionKey:
+                "Timed out waiting for the Contacts app. If macOS is asking whether ContactMirror may control Contacts, click OK."])
+        }
         if p.terminationStatus != 0 {
             let msg = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
             if msg.contains("-1743") || msg.lowercased().contains("not authorized") {

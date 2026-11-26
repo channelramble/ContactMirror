@@ -84,22 +84,18 @@ public struct EventRecord: SyncableRecord {
         return r.normalized()
     }
 
-    public static func merge3(base: EventRecord, a: EventRecord, b: EventRecord, preferA: Bool) -> EventRecord {
-        let base = base.normalized(), a = a.normalized(), b = b.normalized()
-        var r = base
-        func m<T: Equatable>(_ kp: WritableKeyPath<EventRecord, T>) {
-            let ac = a[keyPath: kp] != base[keyPath: kp], bc = b[keyPath: kp] != base[keyPath: kp]
-            if ac && bc { r[keyPath: kp] = preferA ? a[keyPath: kp] : b[keyPath: kp] }
-            else if ac { r[keyPath: kp] = a[keyPath: kp] }
-            else if bc { r[keyPath: kp] = b[keyPath: kp] }
-        }
-        m(\.title); m(\.location); m(\.notes); m(\.url); m(\.busy); m(\.recurrence); m(\.overrides)
-        // Start, end, all-day and time zone describe one moment together: never mix them.
-        let aTime = (a.allDay, a.start, a.end, a.timeZone), bTime = (b.allDay, b.start, b.end, b.timeZone)
-        let baseTime = (base.allDay, base.start, base.end, base.timeZone)
-        let pick = (aTime != baseTime && (bTime == baseTime || preferA)) ? a : b
-        r.allDay = pick.allDay; r.start = pick.start; r.end = pick.end; r.timeZone = pick.timeZone
-        return r.normalized()
+    /// Start, end, all-day and time zone describe one moment together and are never mixed.
+    public struct Timing: Equatable {
+        var allDay: Bool; var start: String; var end: String; var timeZone: String
+    }
+    public var timing: Timing {
+        get { Timing(allDay: allDay, start: start, end: end, timeZone: timeZone) }
+        set { allDay = newValue.allDay; start = newValue.start; end = newValue.end; timeZone = newValue.timeZone }
+    }
+
+    public static var mergeFields: [MergeField<EventRecord>] {
+        [.field(\.title), .field(\.location), .field(\.notes), .field(\.url), .field(\.busy),
+         .field(\.recurrence), .field(\.overrides), .field(\.timing)]
     }
 }
 

@@ -144,6 +144,9 @@ public final class GoogleContactsProvider: RecordProvider, @unchecked Sendable {
         // Keep fields ContactMirror doesn't model so updates don't drop them.
         meta["organizations"] = jsonString(p["organizations"] ?? [])
         meta["nicknames"] = jsonString(p["nicknames"] ?? [])
+        // Birthdays Google only has as free text (no date) can't be synced; keep them on updates.
+        let textBirthdays = (p["birthdays"] as? [[String: Any]] ?? []).filter { $0["date"] == nil && $0["text"] != nil }
+        meta["textBirthdays"] = jsonString(textBirthdays)
         return RemoteContact(id: rn, record: record(from: p, includeNotes: includeNotes), photoKey: photoKey, meta: meta)
     }
 
@@ -185,6 +188,9 @@ public final class GoogleContactsProvider: RecordProvider, @unchecked Sendable {
         }
         let hasOrg = !(r.organization.isEmpty && r.department.isEmpty && r.jobTitle.isEmpty)
         body["organizations"] = (hasOrg ? [first] : []) + Array(orgs.dropFirst())
+        if r.birthday == nil {
+            body["birthdays"] = jsonArray(existing.meta["textBirthdays"])
+        }
         let nicks = jsonArray(existing.meta["nicknames"])
         body["nicknames"] = (r.nickname.isEmpty ? [] : [["value": r.nickname]]) + Array(nicks.dropFirst())
         return body

@@ -157,6 +157,14 @@ final class AppModel: ObservableObject {
 
     private func tick() {
         let now = Date()
+        if syncEnabled, !isSyncing, let problem = setupProblem {
+            // Never sit there silently: show it in the menu bar and notify once per problem.
+            if lastError != problem {
+                lastError = problem
+                log("Not syncing: \(problem)")
+                Notifier.post(title: "ContactMirror isn't syncing", body: problem)
+            }
+        }
         if syncEnabled, isReady, !isSyncing {
             let due = lastAttempt.map { now.timeIntervalSince($0) >= Double(syncIntervalMinutes) * 60 } ?? true
             if due { syncNow() }
@@ -271,7 +279,8 @@ final class AppModel: ObservableObject {
         return supportDir.appendingPathComponent("state-\(h).json")
     }
 
-    func syncNow(allowMassDeletion: Bool = false) {
+    func syncNow(allowMassDeletion: Bool = false, approved: Set<String> = []) {
+        guard !installingUpdate else { return }
         guard !isSyncing else { return }
         refreshAccountState()
         if let problem = setupProblem {
@@ -292,6 +301,7 @@ final class AppModel: ObservableObject {
         var options = SyncOptions()
         options.preference = preference
         options.allowMassDeletion = allowMassDeletion
+        options.allowMassDeletionFor = approved
         log("Sync started")
 
         Task.detached(priority: .utility) { [weak self] in
@@ -373,7 +383,10 @@ final class AppModel: ObservableObject {
         }
         if let fatal {
             lastError = fatal
+            Notifier.post(title: "ContactMirror sync failed", body: fatal)
         } else if !paused.isEmpty {
+            Notifier.post(title: "ContactMirror paused deletions",
+                          body: "A sync would delete many items. Open the menu bar icon → Review Paused Deletions.")
             lastError = "Paused for safety: " + paused.map { "\($0.what) would delete \($0.google) from Google and \($0.icloud) from iCloud" }
                 .joined(separator: "; ") + ". Review in the menu."
         } else if errors > 0 {
@@ -398,8 +411,10 @@ final class AppModel: ObservableObject {
         alert.alertStyle = .warning
         NSApp.activate(ignoringOtherApps: true)
         if alert.runModal() == .alertFirstButtonReturn {
+            // Only the collections the user just reviewed are allowed to delete in bulk.
+            let approved = Set(pausedDeletions.map(\.what))
             pausedDeletions = []
-            syncNow(allowMassDeletion: true)
+            syncNow(approved: approved)
         }
     }
 
@@ -439,6 +454,8 @@ final class AppModel: ObservableObject {
         log("Installing update \(release.version)")
         Task {
             do {
+                // A sync may have started while we were downloading; never quit in the middle of one.
+                while isSyncing { try await Task.sleep(nanoseconds: 1_000_000_000) }
                 try await updater.install(release)
                 log("Update staged, relaunching")
                 NSApp.terminate(nil)
@@ -478,6 +495,29 @@ final class AppModel: ObservableObject {
             h.seekToEndOfFile(); h.write(data); try? h.close()
         } else {
             try? data.write(to: logURL)
+        }
+    }
+}
+
+import UserNotifications
+
+/// macOS notifications for problems the user needs to act on (throttled per message).
+@MainActor
+enum Notifier {
+    private static var lastSent: [String: Date] = [:]
+
+    static func post(title: String, body: String) {
+        guard ProcessInfo.processInfo.environment["CONTACTMIRROR_PREVIEW"] != "1" else { return }
+        let key = title + body
+        if let t = lastSent[key], Date().timeIntervalSince(t) < 6 * 3600 { return }
+        lastSent[key] = Date()
+        let center = UNUserNotificationCenter.current()
+        center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
+            guard granted else { return }
+            let content = UNMutableNotificationContent()
+            content.title = title
+            content.body = body
+            center.add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
         }
     }
 }
