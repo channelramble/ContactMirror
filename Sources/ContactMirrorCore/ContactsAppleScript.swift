@@ -153,14 +153,13 @@ enum ContactsAppleScript {
     }
 
     static func run(_ script: String) throws {
-        try ensureAutomationAllowed()
         if blockLock.withLock({ Date() < blockedUntil }) {
             throw NSError(domain: "ContactMirror", code: -1743, userInfo: [NSLocalizedDescriptionKey:
                 "Waiting for permission to control the Contacts app (needed for contacts that have notes). Allow it in System Settings → Privacy & Security → Automation."])
         }
-        do { try runUnchecked(script) } catch {
+        do { try ensureAutomationAllowed(); try runUnchecked(script) } catch {
             let code = (error as NSError).code
-            if code == -1743 || code == -1712 || code == -1744 { blockLock.withLock { blockedUntil = Date().addingTimeInterval(20 * 60) } }
+            if code == -1743 || code == -1712 || code == -1744 { blockLock.withLock { blockedUntil = Date().addingTimeInterval(10 * 60) } }
             throw error
         }
     }
